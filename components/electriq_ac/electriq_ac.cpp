@@ -14,6 +14,18 @@ static const char *const FAN_SPEED_3 = "Mid";
 static const char *const FAN_SPEED_4 = "Mid-High";
 static const char *const FAN_SPEED_5 = "High";
 
+// ---------------------------------------------------------------------------
+// SLEEP MODE CALIBRATION
+// Flash with these defaults, press Sleep on the remote, compare Raw: log lines
+// before and after. Find which byte (index 0-15) changes and to what value,
+// then update SLEEP_RECV_BYTE / SLEEP_RECV_ON and SLEEP_SEND_BYTE / SLEEP_SEND_ON.
+// SLEEP_SEND_BYTE is the 0-based index within the 11-byte payload after 0xAA.
+// ---------------------------------------------------------------------------
+static const uint8_t SLEEP_RECV_BYTE = 9;    // which of b[0..15] carries the sleep flag
+static const uint8_t SLEEP_RECV_ON   = 0x01; // value of that byte when sleep is active
+static const uint8_t SLEEP_SEND_BYTE = 9;    // position in outgoing payload (0 = first byte after 0xAA)
+static const uint8_t SLEEP_SEND_ON   = 0x01; // value to send to enable sleep
+
 void ElectriqAC::setup() {
   this->set_interval("heartbeat", 1800, [this] { SendHeartbeat(); });
 }
@@ -31,10 +43,25 @@ void ElectriqAC::SendToMCU() {
   tuyacmd = (ac_mode_ + fan_speed_);
   // ensure we have obtained the MCU settings and published before commanding the MCU
   if (target_temp_ != 0) {
-    uint8_t checksum = (0xAA + 0x03 + tuyacmd + swing_ + target_temp_ + 0x0B);
-    write_array({0xAA, 0x03, tuyacmd, swing_, target_temp_, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, checksum});
-    ESP_LOGD(TAG, "SendToMCU fan/mode: %s, target_temp: %s", format_hex_pretty(tuyacmd).c_str(),
-             format_hex_pretty(target_temp_).c_str());
+    // Build the 11-byte payload (sent after the 0xAA header).
+    // Positions 4, 5, 6, 9, 10 are unknown/unused except for sleep_.
+    // SLEEP_SEND_BYTE indexes into this array; adjust if needed after log capture.
+    uint8_t payload[11] = {0x03, tuyacmd, swing_, target_temp_, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00};
+    payload[SLEEP_SEND_BYTE] = sleep_;
+
+    // Checksum = 0xAA + the specific command bytes the MCU validates
+    uint8_t checksum = (0xAA + payload[0] + payload[1] + payload[2] + payload[3] + payload[7] + sleep_);
+
+    write_array({0xAA,
+                 payload[0], payload[1], payload[2], payload[3],
+                 payload[4], payload[5], payload[6], payload[7],
+                 payload[8], payload[9],
+                 checksum});
+
+    ESP_LOGD(TAG, "SendToMCU fan/mode: %s, target_temp: %s, sleep: %02X",
+             format_hex_pretty(tuyacmd).c_str(),
+             format_hex_pretty(target_temp_).c_str(),
+             sleep_);
     // we wrote something, so ensure it's published back to HA too
     this->publish_state();
   } else {
@@ -96,6 +123,15 @@ void ElectriqAC::AcSwing() {
   }
 }
 
+// Set sleep_ byte based on current preset
+void ElectriqAC::AcPreset() {
+  if (this->preset == climate::CLIMATE_PRESET_SLEEP) {
+    sleep_ = SLEEP_SEND_ON;
+  } else {
+    sleep_ = 0x00;
+  }
+}
+
 bool ElectriqAC::CheckIdle(uint8_t &a) {
   if (a == 0x00) {
     return true;
@@ -109,15 +145,22 @@ void ElectriqAC::ReadMCU() {
   uint8_t csum = 0;
   uint8_t c;
   uint8_t b[16];
-  
+
   ESP_LOGD(TAG, "ReadMCU called, bytes available: %d", this->available());
-  
+
   // find header byte, read further 16 bytes into array
   while (this->available()) {
     read_byte(&c);
     if (c == 0xAA) {
       ESP_LOGD(TAG, "Found header byte 0xAA, reading 16 bytes...");
       read_array(b, 16);
+
+      // Full raw dump — compare lines before/after pressing Sleep on the remote
+      // to identify SLEEP_RECV_BYTE and SLEEP_RECV_ON values above.
+      ESP_LOGD(TAG, "Raw: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+               b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+               b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+
       ESP_LOGD(TAG, "Read complete. Byte[1]=%02X, Byte[3]=%02X (target_temp)", b[1], b[3]);
       // if any more bytes available in the serial buffer, read each one to clear them out
       while (this->available()) {
@@ -138,11 +181,12 @@ void ElectriqAC::ReadMCU() {
       uint8_t m = (b[1] & 0x0F);
       uint8_t s = (b[2] & 0x0F);
       uint8_t a = (b[11] & 0x0F);
-      static uint8_t last_b1;   // command
-      static uint8_t last_b2;   // swing
-      static uint8_t last_b3;   // set temp
-      static uint8_t last_b7;   // temp probe
-      static uint8_t last_b11;  // active state
+      static uint8_t last_b1;              // command
+      static uint8_t last_b2;              // swing
+      static uint8_t last_b3;              // set temp
+      static uint8_t last_b7;              // temp probe
+      static uint8_t last_b11;             // active state
+      static uint8_t last_sleep_byte;      // sleep flag byte
 
       if (f == 0x10) {
         ESP_LOGD(TAG, "Detected mode: Standby");
@@ -223,12 +267,24 @@ void ElectriqAC::ReadMCU() {
         this->swing_mode = climate::CLIMATE_SWING_OFF;
       }
 
+      // update sleep preset from MCU state
+      bool sleep_on = (b[SLEEP_RECV_BYTE] == SLEEP_RECV_ON);
+      if (sleep_on) {
+        ESP_LOGD(TAG, "Detected preset: Sleep (b[%d]=%02X)", SLEEP_RECV_BYTE, b[SLEEP_RECV_BYTE]);
+        this->preset = climate::CLIMATE_PRESET_SLEEP;
+        sleep_ = SLEEP_SEND_ON;
+      } else {
+        this->preset = climate::CLIMATE_PRESET_NONE;
+        sleep_ = 0x00;
+      }
+
       this->current_temperature = b[7];
       this->target_temperature = b[3];
       target_temp_ = b[3];
 
       // only publish state if something changes
-      if ((last_b1 != b[1]) || (last_b2 != b[2]) || (last_b3 != b[3]) || (last_b7 != b[7]) || (last_b11 != b[11])) {
+      if ((last_b1 != b[1]) || (last_b2 != b[2]) || (last_b3 != b[3]) || (last_b7 != b[7]) ||
+          (last_b11 != b[11]) || (last_sleep_byte != b[SLEEP_RECV_BYTE])) {
         ESP_LOGD(TAG, "Publishing new state...");
         this->publish_state();
         last_b1 = b[1];
@@ -236,6 +292,7 @@ void ElectriqAC::ReadMCU() {
         last_b3 = b[3];
         last_b7 = b[7];
         last_b11 = b[11];
+        last_sleep_byte = b[SLEEP_RECV_BYTE];
       }
     }
   }
@@ -269,12 +326,18 @@ void ElectriqAC::control(const climate::ClimateCall &call) {
     // Set fan speed nibble here to avoid unexpected switch-off on temp changes
     AcFanSpeed();
     SendToMCU();
+  } else if (call.get_preset().has_value()) {
+    ESP_LOGD(TAG, "New preset value seen");
+    this->preset = *call.get_preset();
+    AcPreset();
+    AcFanSpeed();
+    SendToMCU();
   }
 }
 
 climate::ClimateTraits ElectriqAC::traits() {
   auto traits = climate::ClimateTraits();
-  
+
   // Using deprecated methods - they still work, just show warnings
   // The replacement API varies by ESPHome version, update in future.
   #pragma GCC diagnostic push
@@ -283,7 +346,7 @@ climate::ClimateTraits ElectriqAC::traits() {
   traits.set_supports_two_point_target_temperature(false);
   traits.set_supports_current_temperature(true);
   #pragma GCC diagnostic pop
-  
+
   traits.set_visual_min_temperature(16);
   traits.set_visual_max_temperature(32);
   traits.set_visual_temperature_step(1);
@@ -299,6 +362,11 @@ climate::ClimateTraits ElectriqAC::traits() {
     FAN_SPEED_3,
     FAN_SPEED_4,
     FAN_SPEED_5
+  });
+
+  traits.set_supported_presets({
+    climate::CLIMATE_PRESET_NONE,
+    climate::CLIMATE_PRESET_SLEEP,
   });
 
   return traits;

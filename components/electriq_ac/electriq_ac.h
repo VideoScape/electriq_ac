@@ -23,11 +23,13 @@ class ElectriqAC : public climate::Climate, public Component, public uart::UARTD
   void AcModes();
   void AcSwing();
   bool CheckIdle(uint8_t &a);
+  void AcPreset();
 
   uint8_t ac_mode_ = 0x03;
   uint8_t fan_speed_ = 0x90;
   uint8_t swing_ = 0;
   uint8_t target_temp_ = 0;
+  uint8_t sleep_ = 0x00;  // sleep byte sent to MCU; value set by AcPreset()
 };
 
 }  // namespace electriq_ac
