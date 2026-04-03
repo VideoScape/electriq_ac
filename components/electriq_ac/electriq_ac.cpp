@@ -160,7 +160,7 @@ void ElectriqAC::ReadMCU() {
       static uint8_t last_b3;              // set temp
       static uint8_t last_b7;              // temp probe
       static uint8_t last_b11;             // active state
-      static uint8_t last_sleep_byte;      // sleep flag byte
+      static uint8_t last_sleep_byte;      // sleep flag byte (only valid once SLEEP_RECV_BYTE < 16)
 
       if (f == 0x10) {
         ESP_LOGD(TAG, "Detected mode: Standby");
@@ -241,24 +241,20 @@ void ElectriqAC::ReadMCU() {
         this->swing_mode = climate::CLIMATE_SWING_OFF;
       }
 
-      // update sleep preset from MCU state
-      bool sleep_on = (b[SLEEP_RECV_BYTE] == SLEEP_RECV_ON);
-      if (sleep_on) {
-        ESP_LOGD(TAG, "Detected preset: Sleep (b[%d]=%02X)", SLEEP_RECV_BYTE, b[SLEEP_RECV_BYTE]);
-        this->preset = climate::CLIMATE_PRESET_SLEEP;
-        sleep_ = SLEEP_SEND_ON;
-      } else {
-        this->preset = climate::CLIMATE_PRESET_NONE;
-        sleep_ = 0x00;
-      }
-
       this->current_temperature = b[7];
       this->target_temperature = b[3];
       target_temp_ = b[3];
 
       // only publish state if something changes
+      bool sleep_byte_changed = false;
+      if (SLEEP_RECV_BYTE < 16) {
+        // placeholder active — safe to index once byte is calibrated
+        sleep_byte_changed = (last_sleep_byte != b[SLEEP_RECV_BYTE]);
+        last_sleep_byte = b[SLEEP_RECV_BYTE];
+        ESP_LOGD(TAG, "Sleep candidate b[%d]=%02X", SLEEP_RECV_BYTE, b[SLEEP_RECV_BYTE]);
+      }
       if ((last_b1 != b[1]) || (last_b2 != b[2]) || (last_b3 != b[3]) || (last_b7 != b[7]) ||
-          (last_b11 != b[11]) || (last_sleep_byte != b[SLEEP_RECV_BYTE])) {
+          (last_b11 != b[11]) || sleep_byte_changed) {
         ESP_LOGD(TAG, "Publishing new state...");
         this->publish_state();
         last_b1 = b[1];
@@ -266,7 +262,6 @@ void ElectriqAC::ReadMCU() {
         last_b3 = b[3];
         last_b7 = b[7];
         last_b11 = b[11];
-        last_sleep_byte = b[SLEEP_RECV_BYTE];
       }
     }
   }
