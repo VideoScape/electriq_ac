@@ -16,15 +16,13 @@ static const char *const FAN_SPEED_5 = "High";
 
 // ---------------------------------------------------------------------------
 // SLEEP MODE CALIBRATION
-// Flash with these defaults, press Sleep on the remote, compare Raw: log lines
-// before and after. Find which byte (index 0-15) changes and to what value,
-// then update SLEEP_RECV_BYTE / SLEEP_RECV_ON and SLEEP_SEND_BYTE / SLEEP_SEND_ON.
-// SLEEP_SEND_BYTE is the 0-based index within the 11-byte payload after 0xAA.
+// Flash this build, press Sleep on the remote, compare Raw: log lines before
+// and after. Whichever byte (index 0-15) changes is SLEEP_RECV_BYTE, and the
+// new value is SLEEP_RECV_ON. Update both constants, then the send side can
+// be implemented.
 // ---------------------------------------------------------------------------
-static const uint8_t SLEEP_RECV_BYTE = 9;    // which of b[0..15] carries the sleep flag
-static const uint8_t SLEEP_RECV_ON   = 0x01; // value of that byte when sleep is active
-static const uint8_t SLEEP_SEND_BYTE = 9;    // position in outgoing payload (0 = first byte after 0xAA)
-static const uint8_t SLEEP_SEND_ON   = 0x01; // value to send to enable sleep
+static const uint8_t SLEEP_RECV_BYTE = 0xFF; // placeholder — update after log capture
+static const uint8_t SLEEP_RECV_ON   = 0x01; // placeholder — update after log capture
 
 void ElectriqAC::setup() {
   this->set_interval("heartbeat", 1800, [this] { SendHeartbeat(); });
@@ -43,25 +41,10 @@ void ElectriqAC::SendToMCU() {
   tuyacmd = (ac_mode_ + fan_speed_);
   // ensure we have obtained the MCU settings and published before commanding the MCU
   if (target_temp_ != 0) {
-    // Build the 11-byte payload (sent after the 0xAA header).
-    // Positions 4, 5, 6, 9, 10 are unknown/unused except for sleep_.
-    // SLEEP_SEND_BYTE indexes into this array; adjust if needed after log capture.
-    uint8_t payload[11] = {0x03, tuyacmd, swing_, target_temp_, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00};
-    payload[SLEEP_SEND_BYTE] = sleep_;
-
-    // Checksum = 0xAA + the specific command bytes the MCU validates
-    uint8_t checksum = (0xAA + payload[0] + payload[1] + payload[2] + payload[3] + payload[7] + sleep_);
-
-    write_array({0xAA,
-                 payload[0], payload[1], payload[2], payload[3],
-                 payload[4], payload[5], payload[6], payload[7],
-                 payload[8], payload[9],
-                 checksum});
-
-    ESP_LOGD(TAG, "SendToMCU fan/mode: %s, target_temp: %s, sleep: %02X",
-             format_hex_pretty(tuyacmd).c_str(),
-             format_hex_pretty(target_temp_).c_str(),
-             sleep_);
+    uint8_t checksum = (0xAA + 0x03 + tuyacmd + swing_ + target_temp_ + 0x0B);
+    write_array({0xAA, 0x03, tuyacmd, swing_, target_temp_, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, checksum});
+    ESP_LOGD(TAG, "SendToMCU fan/mode: %s, target_temp: %s", format_hex_pretty(tuyacmd).c_str(),
+             format_hex_pretty(target_temp_).c_str());
     // we wrote something, so ensure it's published back to HA too
     this->publish_state();
   } else {
@@ -120,15 +103,6 @@ void ElectriqAC::AcSwing() {
     case climate::CLIMATE_SWING_VERTICAL:
       swing_ = 0x0C;
       break;
-  }
-}
-
-// Set sleep_ byte based on current preset
-void ElectriqAC::AcPreset() {
-  if (this->preset == climate::CLIMATE_PRESET_SLEEP) {
-    sleep_ = SLEEP_SEND_ON;
-  } else {
-    sleep_ = 0x00;
   }
 }
 
@@ -326,12 +300,6 @@ void ElectriqAC::control(const climate::ClimateCall &call) {
     // Set fan speed nibble here to avoid unexpected switch-off on temp changes
     AcFanSpeed();
     SendToMCU();
-  } else if (call.get_preset().has_value()) {
-    ESP_LOGD(TAG, "New preset value seen");
-    this->preset = *call.get_preset();
-    AcPreset();
-    AcFanSpeed();
-    SendToMCU();
   }
 }
 
@@ -362,11 +330,6 @@ climate::ClimateTraits ElectriqAC::traits() {
     FAN_SPEED_3,
     FAN_SPEED_4,
     FAN_SPEED_5
-  });
-
-  traits.set_supported_presets({
-    climate::CLIMATE_PRESET_NONE,
-    climate::CLIMATE_PRESET_SLEEP,
   });
 
   return traits;
