@@ -15,14 +15,13 @@ static const char *const FAN_SPEED_4 = "Mid-High";
 static const char *const FAN_SPEED_5 = "High";
 
 // ---------------------------------------------------------------------------
-// SLEEP MODE CALIBRATION
-// Flash this build, press Sleep on the remote, compare Raw: log lines before
-// and after. Whichever byte (index 0-15) changes is SLEEP_RECV_BYTE, and the
-// new value is SLEEP_RECV_ON. Update both constants, then the send side can
-// be implemented.
+// SLEEP MODE — protocol byte 4 (b[2] in received array, swing_ in sent command)
+// Per the README, byte 4 carries swing, C/F display, AND sleep as bit flags.
+// Swing uses bits 2-3 (0x0C). Sleep is almost certainly bit 4 (0x10).
+// Flash, press Sleep on the remote, watch b[2] in the Raw: log line change.
+// If 0x10 is wrong, update SLEEP_BIT to the correct bit mask.
 // ---------------------------------------------------------------------------
-static const uint8_t SLEEP_RECV_BYTE = 0xFF; // placeholder — update after log capture
-static const uint8_t SLEEP_RECV_ON   = 0x01; // placeholder — update after log capture
+static const uint8_t SLEEP_BIT = 0x10;
 
 void ElectriqAC::setup() {
   this->set_interval("heartbeat", 1800, [this] { SendHeartbeat(); });
@@ -41,10 +40,12 @@ void ElectriqAC::SendToMCU() {
   tuyacmd = (ac_mode_ + fan_speed_);
   // ensure we have obtained the MCU settings and published before commanding the MCU
   if (target_temp_ != 0) {
-    uint8_t checksum = (0xAA + 0x03 + tuyacmd + swing_ + target_temp_ + 0x0B);
-    write_array({0xAA, 0x03, tuyacmd, swing_, target_temp_, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, checksum});
-    ESP_LOGD(TAG, "SendToMCU fan/mode: %s, target_temp: %s", format_hex_pretty(tuyacmd).c_str(),
-             format_hex_pretty(target_temp_).c_str());
+    uint8_t flags = swing_ | (sleep_ ? SLEEP_BIT : 0x00);
+    uint8_t checksum = (0xAA + 0x03 + tuyacmd + flags + target_temp_ + 0x0B);
+    write_array({0xAA, 0x03, tuyacmd, flags, target_temp_, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, checksum});
+    ESP_LOGD(TAG, "SendToMCU fan/mode: %s target_temp: %s flags: %02X (swing=%02X sleep=%d)",
+             format_hex_pretty(tuyacmd).c_str(), format_hex_pretty(target_temp_).c_str(),
+             flags, swing_, sleep_);
     // we wrote something, so ensure it's published back to HA too
     this->publish_state();
   } else {
@@ -106,6 +107,10 @@ void ElectriqAC::AcSwing() {
   }
 }
 
+void ElectriqAC::AcPreset() {
+  sleep_ = (this->preset == climate::CLIMATE_PRESET_SLEEP);
+}
+
 bool ElectriqAC::CheckIdle(uint8_t &a) {
   if (a == 0x00) {
     return true;
@@ -150,17 +155,17 @@ void ElectriqAC::ReadMCU() {
                  format_hex_pretty(b[15]).c_str());
         return;
       }
-      // Simple bitwise AND ops to get fan, mode, swing and action nibbles
+      // Simple bitwise AND ops to get fan, mode, swing, sleep and action nibbles
       uint8_t f = (b[1] & 0xF0);
       uint8_t m = (b[1] & 0x0F);
-      uint8_t s = (b[2] & 0x0F);
+      uint8_t s = (b[2] & 0x0F);   // lower nibble: swing
       uint8_t a = (b[11] & 0x0F);
-      static uint8_t last_b1;              // command
-      static uint8_t last_b2;              // swing
-      static uint8_t last_b3;              // set temp
-      static uint8_t last_b7;              // temp probe
-      static uint8_t last_b11;             // active state
-      static uint8_t last_sleep_byte;      // sleep flag byte (only valid once SLEEP_RECV_BYTE < 16)
+      bool    sleep_on = (b[2] & SLEEP_BIT) != 0;
+      static uint8_t last_b1;    // command
+      static uint8_t last_b2;    // flags (swing + sleep)
+      static uint8_t last_b3;    // set temp
+      static uint8_t last_b7;    // temp probe
+      static uint8_t last_b11;   // active state
 
       if (f == 0x10) {
         ESP_LOGD(TAG, "Detected mode: Standby");
@@ -241,20 +246,22 @@ void ElectriqAC::ReadMCU() {
         this->swing_mode = climate::CLIMATE_SWING_OFF;
       }
 
+      // update sleep preset from MCU state (b[2] upper bits)
+      if (sleep_on) {
+        ESP_LOGD(TAG, "Detected preset: Sleep");
+        this->preset = climate::CLIMATE_PRESET_SLEEP;
+        sleep_ = true;
+      } else {
+        this->preset = climate::CLIMATE_PRESET_NONE;
+        sleep_ = false;
+      }
+
       this->current_temperature = b[7];
       this->target_temperature = b[3];
       target_temp_ = b[3];
 
-      // only publish state if something changes
-      bool sleep_byte_changed = false;
-      if (SLEEP_RECV_BYTE < 16) {
-        // placeholder active — safe to index once byte is calibrated
-        sleep_byte_changed = (last_sleep_byte != b[SLEEP_RECV_BYTE]);
-        last_sleep_byte = b[SLEEP_RECV_BYTE];
-        ESP_LOGD(TAG, "Sleep candidate b[%d]=%02X", SLEEP_RECV_BYTE, b[SLEEP_RECV_BYTE]);
-      }
-      if ((last_b1 != b[1]) || (last_b2 != b[2]) || (last_b3 != b[3]) || (last_b7 != b[7]) ||
-          (last_b11 != b[11]) || sleep_byte_changed) {
+      // only publish state if something changes (b[2] covers both swing and sleep)
+      if ((last_b1 != b[1]) || (last_b2 != b[2]) || (last_b3 != b[3]) || (last_b7 != b[7]) || (last_b11 != b[11])) {
         ESP_LOGD(TAG, "Publishing new state...");
         this->publish_state();
         last_b1 = b[1];
@@ -295,6 +302,12 @@ void ElectriqAC::control(const climate::ClimateCall &call) {
     // Set fan speed nibble here to avoid unexpected switch-off on temp changes
     AcFanSpeed();
     SendToMCU();
+  } else if (call.get_preset().has_value()) {
+    ESP_LOGD(TAG, "New preset value seen");
+    this->preset = *call.get_preset();
+    AcPreset();
+    AcFanSpeed();
+    SendToMCU();
   }
 }
 
@@ -325,6 +338,11 @@ climate::ClimateTraits ElectriqAC::traits() {
     FAN_SPEED_3,
     FAN_SPEED_4,
     FAN_SPEED_5
+  });
+
+  traits.set_supported_presets({
+    climate::CLIMATE_PRESET_NONE,
+    climate::CLIMATE_PRESET_SLEEP,
   });
 
   return traits;
