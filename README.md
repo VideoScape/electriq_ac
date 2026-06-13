@@ -1,5 +1,7 @@
 # ESPhome component for Electriq 12000 BTU WiFi Smart AC
 
+> Fork of [dslatford/electriq_ac](https://github.com/dslatford/electriq_ac) with sleep mode and Smart Cool (reported as the "Auto" climate mode) added.
+
 This external component for ESPhome replaces the Tuya firmware within the ESP8266 wifi module found inside [Electriq](https://www.electriq.co.uk) branded air conditioning units for integration into Home Assistant. Developed on the 12000 Smart model, others may also be supported.
 
 ## Introduction
@@ -63,7 +65,7 @@ With ESPHome installed, create a new device of type ESP8266. Add the following t
 
 ```yaml
 external_components:
-  - source: github://dslatford/electriq_ac
+  - source: github://VideoScape/electriq_ac
     components: [ electriq_ac ]
 
 uart:

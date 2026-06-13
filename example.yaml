@@ -5,7 +5,7 @@ substitutions:
   friendly_name: "Electriq 12000 AC 01"
 
 external_components:
-  - source: github://dslatford/electriq_ac
+  - source: github://VideoScape/electriq_ac
     components: [ electriq_ac ]
 
 esphome:
@@ -46,7 +46,7 @@ uart:
 climate:
   - platform: electriq_ac
     name: "${friendly_name}"
-    id: "${climate_id}
+    id: ${climate_id}
 
 # Optional: Fan overrun automation to prevent temperature overshooting in heat mode
 # This runs the fan after heating stops to remove latent heat from the evaporator
@@ -65,8 +65,8 @@ binary_sensor:
         - delay: 90s
         - climate.control:
             id: ${climate_id}
-            fan_mode: HIGH
+            custom_fan_mode: "Max"
         - delay: 60s
         - climate.control:
             id: ${climate_id}
-            fan_mode: LOW
+            custom_fan_mode: "Low"
