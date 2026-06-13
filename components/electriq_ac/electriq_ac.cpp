@@ -26,6 +26,10 @@ static const uint8_t SLEEP_BIT = 0x40;
 static const uint8_t SMART_COOL_NIBBLE = 0x00;
 
 void ElectriqAC::setup() {
+  // Custom fan modes are set on the Climate entity (ESPHome 2026.5+); get_traits()
+  // wires them into the traits automatically. The old traits.set_supported_custom_fan_modes()
+  // is deprecated and removed in 2026.11.0.
+  this->set_supported_custom_fan_modes({FAN_SPEED_1, FAN_SPEED_2, FAN_SPEED_3, FAN_SPEED_4, FAN_SPEED_5});
   this->set_interval("heartbeat", 1800, [this] { SendHeartbeat(); });
 }
 
@@ -336,13 +340,7 @@ climate::ClimateTraits ElectriqAC::traits() {
 
   traits.set_supported_swing_modes({climate::CLIMATE_SWING_OFF, climate::CLIMATE_SWING_VERTICAL});
 
-  traits.set_supported_custom_fan_modes({
-    FAN_SPEED_1,
-    FAN_SPEED_2,
-    FAN_SPEED_3,
-    FAN_SPEED_4,
-    FAN_SPEED_5
-  });
+  // Custom fan modes are now registered in setup() via this->set_supported_custom_fan_modes()
 
   traits.set_supported_presets({
     climate::CLIMATE_PRESET_NONE,
