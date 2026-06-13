@@ -12,16 +12,18 @@ static const char *const FAN_SPEED_1 = "Low";
 static const char *const FAN_SPEED_2 = "Low-Mid";
 static const char *const FAN_SPEED_3 = "Mid";
 static const char *const FAN_SPEED_4 = "Mid-High";
-static const char *const FAN_SPEED_5 = "High";
+static const char *const FAN_SPEED_5 = "Max";
 
-// ---------------------------------------------------------------------------
-// SLEEP MODE — protocol byte 4 (b[2] in received array, swing_ in sent command)
-// Per the README, byte 4 carries swing, C/F display, AND sleep as bit flags.
-// Swing uses bits 2-3 (0x0C). Sleep is almost certainly bit 4 (0x10).
-// Flash, press Sleep on the remote, watch b[2] in the Raw: log line change.
-// If 0x10 is wrong, update SLEEP_BIT to the correct bit mask.
-// ---------------------------------------------------------------------------
-static const uint8_t SLEEP_BIT = 0x10;
+// Sleep mode is bit 6 (0x40) in protocol byte 4 (b[2]), same byte as swing (0x0C)
+static const uint8_t SLEEP_BIT = 0x40;
+
+// Smart Cool is a distinct operating mode, encoded in the mode nibble (b[1] & 0x0F)
+// alongside Cool=0x01, Dry=0x02, Fan=0x03, Heat=0x04. Confirmed from hardware logs:
+// when Smart Cool is selected the MCU reports b[1]=0x90, i.e. mode nibble 0x00.
+// (The old firmware's "case 0x01: default:" caught this and mislabelled it Cool.)
+// Mapped to CLIMATE_MODE_AUTO because ESPHome's climate modes are a fixed enum and
+// the five standard slots are already used; Home Assistant will label it "Auto".
+static const uint8_t SMART_COOL_NIBBLE = 0x00;
 
 void ElectriqAC::setup() {
   this->set_interval("heartbeat", 1800, [this] { SendHeartbeat(); });
@@ -43,9 +45,8 @@ void ElectriqAC::SendToMCU() {
     uint8_t flags = swing_ | (sleep_ ? SLEEP_BIT : 0x00);
     uint8_t checksum = (0xAA + 0x03 + tuyacmd + flags + target_temp_ + 0x0B);
     write_array({0xAA, 0x03, tuyacmd, flags, target_temp_, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, checksum});
-    ESP_LOGD(TAG, "SendToMCU fan/mode: %s target_temp: %s flags: %02X (swing=%02X sleep=%d)",
-             format_hex_pretty(tuyacmd).c_str(), format_hex_pretty(target_temp_).c_str(),
-             flags, swing_, sleep_);
+    ESP_LOGD(TAG, "SendToMCU fan/mode: %s, target_temp: %s", format_hex_pretty(tuyacmd).c_str(),
+             format_hex_pretty(target_temp_).c_str());
     // we wrote something, so ensure it's published back to HA too
     this->publish_state();
   } else {
@@ -87,6 +88,9 @@ void ElectriqAC::AcModes() {
     case climate::CLIMATE_MODE_HEAT:
       ac_mode_ = 0x04;
       break;
+    case climate::CLIMATE_MODE_AUTO:  // Smart Cool
+      ac_mode_ = SMART_COOL_NIBBLE;
+      break;
     case climate::CLIMATE_MODE_OFF:
     default:
       fan_speed_ = 0x10;
@@ -105,10 +109,6 @@ void ElectriqAC::AcSwing() {
       swing_ = 0x0C;
       break;
   }
-}
-
-void ElectriqAC::AcPreset() {
-  sleep_ = (this->preset == climate::CLIMATE_PRESET_SLEEP);
 }
 
 bool ElectriqAC::CheckIdle(uint8_t &a) {
@@ -133,13 +133,10 @@ void ElectriqAC::ReadMCU() {
     if (c == 0xAA) {
       ESP_LOGD(TAG, "Found header byte 0xAA, reading 16 bytes...");
       read_array(b, 16);
-
-      // Full raw dump — compare lines before/after pressing Sleep on the remote
-      // to identify SLEEP_RECV_BYTE and SLEEP_RECV_ON values above.
+      // --- ADDED: full hex dump for sleep mode byte identification ---
       ESP_LOGD(TAG, "Raw: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
                b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
-
       ESP_LOGD(TAG, "Read complete. Byte[1]=%02X, Byte[3]=%02X (target_temp)", b[1], b[3]);
       // if any more bytes available in the serial buffer, read each one to clear them out
       while (this->available()) {
@@ -155,17 +152,16 @@ void ElectriqAC::ReadMCU() {
                  format_hex_pretty(b[15]).c_str());
         return;
       }
-      // Simple bitwise AND ops to get fan, mode, swing, sleep and action nibbles
+      // Simple bitwise AND ops to get fan, mode, swing and action nibbles
       uint8_t f = (b[1] & 0xF0);
       uint8_t m = (b[1] & 0x0F);
-      uint8_t s = (b[2] & 0x0F);   // lower nibble: swing
+      uint8_t s = (b[2] & 0x0F);
       uint8_t a = (b[11] & 0x0F);
-      bool    sleep_on = (b[2] & SLEEP_BIT) != 0;
-      static uint8_t last_b1;    // command
-      static uint8_t last_b2;    // flags (swing + sleep)
-      static uint8_t last_b3;    // set temp
-      static uint8_t last_b7;    // temp probe
-      static uint8_t last_b11;   // active state
+      static uint8_t last_b1;   // command
+      static uint8_t last_b2;   // swing
+      static uint8_t last_b3;   // set temp
+      static uint8_t last_b7;   // temp probe
+      static uint8_t last_b11;  // active state
 
       if (f == 0x10) {
         ESP_LOGD(TAG, "Detected mode: Standby");
@@ -175,7 +171,6 @@ void ElectriqAC::ReadMCU() {
       } else {  // not in standby, report mode / idle at all times
         switch (m) {
           case 0x01:
-          default:
             if (!CheckIdle(a)) {
               this->action = climate::CLIMATE_ACTION_COOLING;
             }
@@ -205,6 +200,24 @@ void ElectriqAC::ReadMCU() {
             }
             ESP_LOGD(TAG, "Detected mode: Heat");
             this->mode = climate::CLIMATE_MODE_HEAT;
+            AcModes();
+            break;
+          case SMART_COOL_NIBBLE:
+            if (!CheckIdle(a)) {
+              this->action = climate::CLIMATE_ACTION_COOLING;
+            }
+            ESP_LOGD(TAG, "Detected mode: Smart Cool");
+            this->mode = climate::CLIMATE_MODE_AUTO;
+            AcModes();
+            break;
+          default:
+            // Unrecognised mode nibble. Logged loudly so a not-yet-mapped mode
+            // (e.g. Smart Cool, if SMART_COOL_NIBBLE is wrong) can be identified.
+            ESP_LOGW(TAG, "Detected mode: UNKNOWN nibble 0x%02X - treating as Cool", m);
+            if (!CheckIdle(a)) {
+              this->action = climate::CLIMATE_ACTION_COOLING;
+            }
+            this->mode = climate::CLIMATE_MODE_COOL;
             AcModes();
             break;
         }
@@ -246,21 +259,15 @@ void ElectriqAC::ReadMCU() {
         this->swing_mode = climate::CLIMATE_SWING_OFF;
       }
 
-      // update sleep preset from MCU state (b[2] upper bits)
-      if (sleep_on) {
-        ESP_LOGD(TAG, "Detected preset: Sleep");
-        this->preset = climate::CLIMATE_PRESET_SLEEP;
-        sleep_ = true;
-      } else {
-        this->preset = climate::CLIMATE_PRESET_NONE;
-        sleep_ = false;
-      }
+      // update sleep
+      sleep_ = (b[2] & SLEEP_BIT) != 0;
+      this->preset = sleep_ ? climate::CLIMATE_PRESET_SLEEP : climate::CLIMATE_PRESET_NONE;
 
       this->current_temperature = b[7];
       this->target_temperature = b[3];
       target_temp_ = b[3];
 
-      // only publish state if something changes (b[2] covers both swing and sleep)
+      // only publish state if something changes
       if ((last_b1 != b[1]) || (last_b2 != b[2]) || (last_b3 != b[3]) || (last_b7 != b[7]) || (last_b11 != b[11])) {
         ESP_LOGD(TAG, "Publishing new state...");
         this->publish_state();
@@ -303,9 +310,8 @@ void ElectriqAC::control(const climate::ClimateCall &call) {
     AcFanSpeed();
     SendToMCU();
   } else if (call.get_preset().has_value()) {
-    ESP_LOGD(TAG, "New preset value seen");
     this->preset = *call.get_preset();
-    AcPreset();
+    sleep_ = (this->preset == climate::CLIMATE_PRESET_SLEEP);
     AcFanSpeed();
     SendToMCU();
   }
@@ -328,7 +334,8 @@ climate::ClimateTraits ElectriqAC::traits() {
   traits.set_visual_temperature_step(1);
 
   traits.set_supported_modes({climate::CLIMATE_MODE_OFF, climate::CLIMATE_MODE_COOL, climate::CLIMATE_MODE_HEAT,
-                              climate::CLIMATE_MODE_DRY, climate::CLIMATE_MODE_FAN_ONLY});
+                              climate::CLIMATE_MODE_DRY, climate::CLIMATE_MODE_FAN_ONLY,
+                              climate::CLIMATE_MODE_AUTO});  // AUTO = Smart Cool
 
   traits.set_supported_swing_modes({climate::CLIMATE_SWING_OFF, climate::CLIMATE_SWING_VERTICAL});
 

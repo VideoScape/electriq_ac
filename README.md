@@ -109,7 +109,7 @@ You can use the `verify_flash` option to ensure its correctly written back. Howe
 
 ## Usage
 
-Once powered up, the device should register on your network and appear online within ESPhome's dashboard. You should be prompted to create a new device in home assistant, and create a default lovelace card. From here everything should work as you might expect. You can control the operating mode, fan speed, set temperature and swing mode from Home Assistant (I didn't yet bother implementing C/F switching, smart cool or sleep mode, but the UI would need modifying too). You should see the temperature readout (in Celsius), and the UI will report when the unit is 'off' vs when it is 'idle'. That is, turned on in heating or cooling modes but fan off (idle) while at set temperature.
+Once powered up, the device should register on your network and appear online within ESPhome's dashboard. You should be prompted to create a new device in home assistant, and create a default lovelace card. From here everything should work as you might expect. You can control the operating mode, fan speed, set temperature and swing mode from Home Assistant. Sleep mode is exposed as a preset, and Smart Cool as an operating mode (it appears as "Auto" in Home Assistant, since ESPHome's climate modes are a fixed enum and can't be renamed). C/F switching is still unimplemented. You should see the temperature readout (in Celsius), and the UI will report when the unit is 'off' vs when it is 'idle'. That is, turned on in heating or cooling modes but fan off (idle) while at set temperature.
 
 ## Overrun
 
