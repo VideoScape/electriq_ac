@@ -320,14 +320,11 @@ void ElectriqAC::control(const climate::ClimateCall &call) {
 climate::ClimateTraits ElectriqAC::traits() {
   auto traits = climate::ClimateTraits();
 
-  // Using deprecated methods - they still work, just show warnings
-  // The replacement API varies by ESPHome version, update in future.
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  traits.set_supports_action(true);
-  traits.set_supports_two_point_target_temperature(false);
-  traits.set_supports_current_temperature(true);
-  #pragma GCC diagnostic pop
+  // ESPHome 2026.5 removed the set_supports_* setters in favour of feature flags
+  // (ClimateFeature enum in climate_mode.h). We support reporting the current
+  // temperature and the current action; single-point target temperature is the
+  // default, so no two-point flag is set.
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE | climate::CLIMATE_SUPPORTS_ACTION);
 
   traits.set_visual_min_temperature(16);
   traits.set_visual_max_temperature(32);
