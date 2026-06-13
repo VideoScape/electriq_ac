@@ -4,6 +4,15 @@
 
 This external component for ESPhome replaces the Tuya firmware within the ESP8266 wifi module found inside [Electriq](https://www.electriq.co.uk) branded air conditioning units for integration into Home Assistant. Developed on the 12000 Smart model, others may also be supported.
 
+## Changes in this fork
+
+This is a fork of [dslatford/electriq_ac](https://github.com/dslatford/electriq_ac). The original already supports the cool, dry, fan-only and heat modes, custom fan speeds, vertical swing, target temperature, room-temperature readout and the heat-mode fan overrun automation. This fork adds the two operating features the original left unimplemented:
+
+- **Sleep mode** — exposed in Home Assistant as the *Sleep* preset. Sleep is a flag in protocol byte 4 (`b[2]`, bit `0x40`), sent alongside the swing bits and read back from the MCU so the preset always reflects the unit's actual state.
+- **Smart Cool** — exposed as the *Auto* climate mode. (ESPHome's climate modes are a fixed enum and can't be renamed, so the unit's "Smart Cool" maps to `AUTO` and appears as "Auto" in Home Assistant.) The MCU reports this mode as nibble `0x00` (`b[1] = 0x90`); selecting Auto sends the same.
+
+Two smaller improvements come along with it: the mode decoder now logs an explicit warning for any unrecognised mode nibble instead of silently falling back to Cool — which is how Smart Cool's `0x00` value was identified from the device logs — and the example overrun automation is corrected to use this component's custom fan modes (`"Max"`/`"Low"`) instead of the standard `HIGH`/`LOW` that no longer exist here.
+
 ## Introduction
 
 The Electriq 12000 BTU WiFi Smart AC with Heat Pump is a portable AC unit sold by (and a brand name of?) https://www.appliancesdirect.co.uk
